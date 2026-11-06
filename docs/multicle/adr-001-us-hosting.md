@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Status | Proposed (needs Lawrence's approval before any spending) |
-| Date | 2026-11-06 (revision 3, after the second Reviewer-QA review on PR #1) |
+| Date | 2026-11-06 (revision 4, after the third Reviewer-QA review on PR #1) |
 | Author | Platform Architect (LVCO-5) |
 | Reviewer | Reviewer-QA |
 | Related | LVCO-4 audit (`docs/multicle/outside-us-dependencies.md`, PR #2), LVCO-7 (stand up the instance), LVCO-2 (licensing decision) |
@@ -20,7 +20,7 @@ Every cost below is a proposal. Nothing in this ADR creates an account, buys a d
 
 ### What the stack is
 
-The self-host stack has three server components: a Go backend (REST and WebSocket), a Next.js frontend and PostgreSQL 17 (`SELF_HOSTING.md:7-11`). Each person who runs agents also runs the `multica` CLI and agent daemon on their own machine (`SELF_HOSTING.md:13`). For LVCOI those machines are HP and elias-HP.
+The self-host stack has three server components: a Go backend (REST and WebSocket), a Next.js frontend and PostgreSQL 17 (`SELF_HOSTING.md:7-11`). Upstream expects each person who runs agents to run the `multica` CLI and agent daemon on their own machine (`SELF_HOSTING.md:13`). This ADR instead runs this instance's daemon on a dedicated daemon host; HP and elias-HP use the browser only.
 
 `docker-compose.selfhost.yml` wires it up:
 
@@ -37,7 +37,7 @@ The audit (PR #2) is the source of truth for classification. The rows that drive
 
 | Audit row | Finding | Class (audit) | How this ADR answers it |
 |---|---|---|---|
-| S1 | Daily telemetry to `telemetry.multica.ai` (`server/internal/selfhosttelemetry/client.go:11`). The only server call made with no configuration | US `us-west-2`, third party (Index Labs) | `DO_NOT_TRACK=1`, and egress to it is blocked |
+| S1 | Daily telemetry to `telemetry.multica.ai` (`server/internal/selfhosttelemetry/client.go:11`). The only server call made with no configuration | Non-US by operator (Index Labs, Hong Kong); servers in `us-west-2` | `DO_NOT_TRACK=1`, and egress to it is blocked |
 | S3-S6 | Lark/Feishu, DingTalk, WeCom, Qoder | Non-US | Keys unset, and egress blocked |
 | S7 | Telegram | Non-US | Key unset, and egress blocked |
 | S9, S10, S19 | Skill imports (`clawhub.ai`, skills.sh, GitHub), user-supplied MCP, plugin and Git endpoints. Triggered by users, no off switch | Unknown or depends on value | Egress blocked. These features fail closed on this instance |
@@ -46,7 +46,7 @@ The audit (PR #2) is the source of truth for classification. The rows that drive
 | B1 | Default images from `ghcr.io/multica-ai` | Upstream | Images built from the fork |
 | D1, D2 | `multica update` and daemon auto-update pull upstream releases | Upstream | `MULTICA_DAEMON_AUTO_UPDATE=false`; `multica update` is not used |
 | D3 | CLI `multica setup` defaults to Multica Cloud | US, third party | Only `multica setup self-host` against our host |
-| D5 | The daemon runs any agent CLI it finds, on `PATH` or through the login shell (`server/internal/daemon/agents_probe.go:118-141`); `qoderclicn`, `dsh`, `kimi` are non-US, the rest unknown | Mixed | Dedicated daemon host with only `claude` installed, every other CLI pinned to a missing path, and Claude locked to Bedrock by managed settings (see Clients and daemon hosts) |
+| D5 | The daemon runs any agent CLI it finds, on `PATH` or through the login shell (`server/internal/daemon/agents_probe.go:118-141`); the audit classes 13 CLIs as non-US (`codebuddy`, `codearts`, `deveco`, `zcode`, `kimi`, `reasonix`, `dim`, `qodercli`, `qoderclicn`, `traecli`, `qwen`, `mcode`, `dsh`) and the rest, other than `claude`, as unknown | Mixed | Dedicated daemon host with only `claude` installed, every other CLI pinned to a missing path, and Claude locked to Bedrock US-region profiles by managed settings and IAM (see Clients and daemon hosts) |
 | C1-C3 | Desktop app defaults to Multica Cloud and auto-updates from upstream | Upstream | Desktop app not used for this instance; browser only |
 | C4, C9 | Browser fetches `api.github.com` for release version and stars (`packages/views/runtimes/components/update-section.tsx:15-16`) | Unknown (edge) | Accepted: no user data sent. Removed by audit follow-up F3 |
 | C5, C10 | Mobile build and Chinese docs page (Bilibili) | Upstream / non-US | Mobile not used; `DOCS_URL` left empty |
@@ -55,7 +55,7 @@ The audit (PR #2) is the source of truth for classification. The rows that drive
 
 ### Functional
 
-- F1. Run backend, frontend and PostgreSQL for one LVCOI workspace, reachable over HTTPS from HP and elias-HP only.
+- F1. Run backend, frontend and PostgreSQL for one LVCOI workspace, reachable over HTTPS only from HP, elias-HP and the dedicated daemon host.
 - F2. Email verification codes reach LVCOI users (`SELF_HOSTING_ADVANCED.md:31-33`).
 - F3. Attachments up to 100 MiB (`SELF_HOSTING_ADVANCED.md:126-133`).
 - F4. The agent daemon connects over WebSocket; realtime updates work in the browser.
@@ -76,7 +76,7 @@ GitHub and GHCR (image source, maintenance window only), the email relay, object
 
 ### Option A: AWS, one US region, managed data services, private access (recommended)
 
-One EC2 instance (the app host) runs Caddy, the backend and the frontend, and a second (the daemon host) runs this instance's agent daemon. RDS for PostgreSQL 17 holds the database, S3 holds uploads and SES sends mail. Access is only through a WireGuard interface on the instance. Region `us-west-2`, which is also the code's default `S3_REGION` (`server/internal/storage/s3.go:55-58`).
+One EC2 instance (the app host, Ubuntu LTS arm64) runs Caddy, the backend and the frontend, and a second (the daemon host, also Ubuntu LTS) runs this instance's agent daemon. RDS for PostgreSQL 17 holds the database, S3 holds uploads and SES sends mail. Access is only through a WireGuard interface on the instance. Region `us-west-2`, which is also the code's default `S3_REGION` (`server/internal/storage/s3.go:55-58`).
 
 - Pros: Every data store is pinned to one region by configuration. RDS gives point-in-time restore without scripts. SES fits the existing SMTP path with no code change (`server/internal/service/email.go:227-237`). Security groups give egress control a process cannot bypass. The same account can serve Bedrock for US inference.
 - Cons: More moving parts than one VM. Needs an AWS account (spending decision).
@@ -122,7 +122,7 @@ flowchart LR
       S3GW[S3 gateway endpoint]
     end
     S3[("S3 uploads + secrets bucket")]
-    BR[Bedrock, us-west-2 regional]
+    BR["Bedrock, us. profile (US regions)"]
   end
   B -- "WireGuard UDP 51820" --> WG
   WG --> C
@@ -160,7 +160,7 @@ The app's certificate comes from a private root that Lawrence creates once, offl
 
 Why not Caddy's own internal CA: it keeps the root key on the instance, in a volume the secrets bundle would back up, and the root carries no name constraints. A compromised instance could then mint certificates that LVCOI machines trust for any site. With an offline root, a compromised instance holds only the leaf key for `app.` and `api.`.
 
-One-time setup on Lawrence's machine (OpenSSL 3):
+One-time setup on Lawrence's machine (OpenSSL 3 or later, run in bash: the `<( )` in the last command needs bash, so on HP use Git Bash or WSL):
 
 ```sh
 # Root, 10 years, constrained to *.multica.lvcoi.internal
@@ -387,6 +387,7 @@ Allowed outbound from the instance in normal operation:
 | RDS security group | TCP 5432 | Database |
 | S3 managed prefix list (`com.amazonaws.us-west-2.s3`) through the gateway endpoint | TCP 443 | Uploads and secrets bucket |
 | SES SMTP interface endpoint security group | TCP 587 | Email. With private DNS on the endpoint, `email-smtp.us-west-2.amazonaws.com` resolves to it |
+| Daemon host security group | TCP 22 | Administration of the daemon host over SSH, started from the app host |
 | WireGuard peers | UDP (replies only) | Security groups are stateful; no rule needed |
 
 Not subject to security groups and therefore always available: the VPC DNS resolver, the instance metadata service and Amazon Time Sync.
@@ -395,7 +396,7 @@ Everything else is denied, including `telemetry.multica.ai`, `api.github.com`, `
 
 This works for mail where a proxy would not. The backend dials SMTP directly (`server/internal/service/email.go:142`) and ignores `HTTPS_PROXY`, so the rule must be at the network layer.
 
-**Maintenance window.** Image pulls (`ghcr.io`, `pkg-containers.githubusercontent.com`), the Caddy image from Docker Hub and OS package updates need general outbound 443. For each maintenance window, the operator attaches a second security group, `maintenance-egress` (TCP 443 to `0.0.0.0/0`), and detaches it afterwards. CloudTrail records both actions.
+**Maintenance window.** Image pulls (`ghcr.io`, `pkg-containers.githubusercontent.com`), the Caddy image from Docker Hub and OS package updates need general outbound 443. For each maintenance window, the operator attaches a second security group, `maintenance-egress` (TCP 80 and 443 to `0.0.0.0/0`), and detaches it afterwards. Port 80 is there because Ubuntu's default `apt` sources, including the EC2 regional mirrors, use `http://`; `apt` checks package signatures, so the content is still verified. CloudTrail records both actions.
 
 Features that stop working because of this, by design: skill import from registries and GitHub, the GitHub App integration, Slack and Composio, remote MCP servers called by the server, and the server LLM layer.
 
@@ -449,14 +450,25 @@ Why a separate host:
 
 Daemon host network:
 
-- Inbound: none from the internet. Administration over SSH from the app host's tunnel (`10.8.0.1`) or the break-glass path.
-- Outbound: TCP 443 to the app host's security group (the Multica server), and TCP 443 to the internet for Bedrock, GitHub (repository clones) and package installs that agents run. Model traffic is pinned to Bedrock by managed settings and IAM, not by the network.
+- Inbound: TCP 22 from the app host's security group only, so the operator reaches it by SSH through the tunnel to the app host and on from there. Nothing from the internet. Break-glass is the same Instance Connect Endpoint path as for the app host.
+- Outbound: TCP 443 to the app host's security group (the Multica server), and TCP 80 and 443 to the internet for Bedrock, GitHub (repository clones), `apt` (which uses `http://` by default) and package installs that agents run. Model traffic is held to Bedrock US-region profiles by managed settings and IAM, not by the network.
 - A public IPv4 address (or a NAT gateway, which costs more) is needed for that outbound traffic.
 
 **CLI and daemon on the daemon host.**
 
 - Build `multica` from the fork (`go build ./server/cmd/multica`), not from upstream releases or the Homebrew tap (audit D2).
-- Connect with `multica setup self-host --profile lvcoi --server-url https://api.multica.lvcoi.internal --app-url https://app.multica.lvcoi.internal`. A remote server needs `--app-url`, or setup prompts for it and fails without it (`server/cmd/multica/cmd_setup.go:200-216`).
+- Do not use `multica setup self-host` on this host. It runs a browser login (`server/cmd/multica/cmd_setup.go:250-253`), which cannot finish unattended, and then starts its own background daemon (`:255-257`) beside the systemd service.
+- **Credential.** Lawrence signs in to the instance in a browser and creates a personal access token (`mul_...`) for this host. It is stored as its own object, `daemon/token`, in the secrets bucket. A bucket policy lets only the daemon host's instance role read that prefix; the daemon host role cannot read the rest of the bundle, and the app host role cannot read the token. On host loss or exposure, revoke the token and create a new one.
+- **Non-interactive setup**, run by user data as the `multica` user (the AWS CLI is installed for the `s3 cp`):
+
+  ```sh
+  multica config set server_url https://api.multica.lvcoi.internal --profile lvcoi
+  multica config set app_url https://app.multica.lvcoi.internal --profile lvcoi
+  multica login --token "$(aws s3 cp s3://<secrets-bucket>/daemon/token -)" --profile lvcoi
+  ```
+
+  `multica login --token` takes a personal access token (`server/cmd/multica/cmd_login.go:58`). The token appears briefly in the process list; on a single-purpose host with one user that is accepted.
+- **Service.** systemd runs `multica daemon start --foreground --profile lvcoi` as `multica`, with the pins below in its environment. The daemon authenticates with the stored config token, never `MULTICA_TOKEN` (`server/cmd/multica/cmd_daemon.go:535-537`).
 - Set `MULTICA_DAEMON_AUTO_UPDATE=false` in the service environment. It is already off for a non-cloud server (`server/internal/daemon/config.go:600-607`); setting it makes that explicit.
 - Never run `multica update`. It pulls upstream releases (audit D1).
 
@@ -464,10 +476,10 @@ Daemon host network:
 
 | CLI | Allowed | Why |
 |---|---|---|
-| `claude` | Yes | Locked to Bedrock `us-west-2` as below |
+| `claude` | Yes | Locked to Bedrock US-region profiles as below |
 | `codex` | Pending decision 4 | US processing is possible but not confirmed for LVCOI's plan |
-| `qoderclicn`, `dsh`, `kimi` | Never | Non-US vendors (audit D5) |
-| All others | No | Region unknown (audit D5) |
+| `codebuddy`, `codearts`, `deveco`, `zcode`, `kimi`, `reasonix`, `dim`, `qodercli`, `qoderclicn`, `traecli`, `qwen`, `mcode`, `dsh` | Never | Non-US (audit D5 vendor classification) |
+| All others | No | Unknown (audit D5) |
 
 Enforcement on the daemon host, in layers:
 
@@ -526,21 +538,28 @@ Provider comparison (all pay-as-you-go through the cloud account, regions chosen
 
 | Provider | For this instance |
 |---|---|
-| Amazon Bedrock | Recommended. Same AWS account and region as the hosting, one IAM model, one bill. Regional endpoints guarantee data routing (`models-overview.md:58`) |
+| Amazon Bedrock | Recommended. Same AWS account as the hosting, one IAM model, one bill. Geographic `us.` inference profiles keep traffic in US regions; a single-region endpoint is also offered (`models-overview.md:58`) |
 | Google Cloud's Agent Platform | Works, with regional endpoints (`models-overview.md:59`). Adds a second cloud account |
 | Microsoft Foundry | Works in chosen Azure regions. Adds a second cloud account |
 
 Claude Code managed settings, in `/etc/claude-code/managed-settings.json` on the daemon host only (`02c-managed-settings-and-managed-only-keys.md:49`):
 
 - `allowedProviders: ["bedrock"]` (`10-enterprise-deployment-overview.md:182`).
-- `env`: `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION=us-west-2`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and regional (not global) model IDs in `ANTHROPIC_DEFAULT_OPUS_MODEL` and `ANTHROPIC_DEFAULT_SONNET_MODEL` (`10-enterprise-deployment-overview.md:176`). Also pin whatever endpoint variables the `allowedProviders` entry names as needing a managed `env` pin (`10-enterprise-deployment-overview.md:182`).
+- `env`: `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION=us-west-2`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ANTHROPIC_DEFAULT_OPUS_MODEL=us.anthropic.claude-opus-5-5` and `ANTHROPIC_DEFAULT_SONNET_MODEL=us.anthropic.claude-sonnet-5-5` (`10-enterprise-deployment-overview.md:176`). The Opus ID is Claude Code's documented default in a `us-*` region; the Sonnet ID follows the same form, and F-5 confirms both in the Bedrock console. Also pin whatever endpoint variables the `allowedProviders` entry names as needing a managed `env` pin (`10-enterprise-deployment-overview.md:182`).
 - `skipWebFetchPreflight: true`, or WebFetch still calls `api.anthropic.com` (`11-enterprise-network-configuration.md:257`).
 
-Credentials: an EC2 instance profile on the daemon host, allowed only `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the pinned models, with a condition `aws:RequestedRegion = us-west-2`. No long-lived keys.
+**Where model traffic goes.** `us.` IDs are geographic cross-region inference profiles: Bedrock may serve a request from any of the US regions AWS lists for the profile, not only `us-west-2`. Traffic stays in US regions, which meets N1. It is not pinned to one region. A true single-region path exists on Bedrock's separate Mantle endpoint (`CLAUDE_CODE_USE_MANTLE=1`, `"mantle"` in `allowedProviders`, `bedrock-mantle:CreateInference`). It is not chosen, because N1 requires the US, not one region, and it adds a second set of settings.
+
+Credentials: an EC2 instance profile on the daemon host, no long-lived keys. Its policy:
+
+- `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on `arn:aws:bedrock:us-west-2:<account>:inference-profile/us.anthropic.claude-*`.
+- The same two actions on `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`, with condition `bedrock:InferenceProfileArn` like `arn:aws:bedrock:us-west-2:<account>:inference-profile/us.anthropic.claude-*`, so the foundation models are reachable only through the US profile. This follows AWS's documented pattern for cross-region profiles; F-5 proves it.
+- `bedrock:ListInferenceProfiles` and `bedrock:GetInferenceProfile`, which Claude Code's documented Bedrock policy also lists.
+- No `aws:RequestedRegion = us-west-2` condition, because it would block the profile's other US destination regions. A non-US `AWS_REGION` set through `custom_env` still fails: the only allowed profile ARN is in `us-west-2`, and a non-US region has no `us.` profile.
 
 These settings change nothing on HP or elias-HP. Sessions there keep their current sign-in and billing.
 
-**Inference cost basis.** List prices per million tokens: Opus 5.5 $4 input and $20 output, Sonnet 5.5 $2 and $10 (`models-overview.md:32`). Cache reads cost 5% of the input price on both (`models-overview.md:49`). Bedrock regional endpoints carry a 10% premium over global ones ([Claude on Amazon Bedrock](https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock)), so about $4.40 and $22 for Opus, $2.20 and $11 for Sonnet.
+**Inference cost basis.** List prices per million tokens: Opus 5.5 $4 input and $20 output, Sonnet 5.5 $2 and $10 (`models-overview.md:32`). Cache reads cost 5% of the input price on both (`models-overview.md:49`). Bedrock regional endpoints carry a 10% premium over global ones ([Claude on Amazon Bedrock](https://platform.claude.com/docs/en/build-with-claude/claude-on-amazon-bedrock)), and AWS describes global profiles as about 10% cheaper than geographic ones such as `us.` ([Global cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html)). The example therefore applies +10% to the `us.` profile: about $4.40 and $22 for Opus, $2.20 and $11 for Sonnet. Confirm against the first AWS bill.
 
 Worked example. Assume one agent run reads 500k input tokens, 90% of them cache reads, and writes 50k output tokens. This is an assumption, not a measurement, and it ignores cache-write charges.
 
@@ -587,7 +606,7 @@ A domain, if LVCOI does not already own one, is only needed for SES. Savings Pla
 ## Logging and audit
 
 - Docker log rotation on both hosts (`local` driver, 5 × 20 MB per container), as given under Deploy files.
-- CloudTrail: the account's event history keeps management events for 90 days with no setup. Create one trail for management events in `us-west-2`, delivering to a prefix in the secrets bucket, so security-group changes such as attaching `maintenance-egress` are kept longer. AWS describes the first copy of management events as free; not verified this session. Delivery is AWS-side and needs no egress from the instances.
+- CloudTrail: the account's event history keeps management events for 90 days with no setup. Create one trail for management events in `us-west-2`, delivering to its own audit bucket that neither instance role can read or write (only CloudTrail's service principal writes, and only Lawrence reads), so security-group changes such as attaching `maintenance-egress` are kept longer. AWS describes the first copy of management events as free; not verified this session. Delivery is AWS-side and needs no egress from the instances.
 - Optional: a CloudWatch alarm when `maintenance-egress` stays attached for more than two hours.
 
 ## Backup and restore
@@ -615,7 +634,7 @@ All commands run in the deploy directory, where `.env` sets `COMPOSE_FILE`.
 
 - Uploads: restore prior object versions for affected keys, or copy back from the replica bucket.
 - App host loss: launch a new instance from the launch template with the same security groups and `maintenance-egress` attached. The user data script restores WireGuard, the deploy directory and the TLS files from the secrets bundle and starts the stack (see Bootstrap). Move the Elastic IP, update `APP_PRIVATE_IP` in `.env` and the daemon host's hosts entry if the private IP changed, then detach `maintenance-egress`. If the script fails, use the break-glass path.
-- Daemon host loss: launch from its own launch template. Its user data installs `claude`, `git` and the fork-built `multica`, writes the managed settings, the systemd unit with the pins, the root certificate and the hosts entry, then runs `multica setup self-host` as above. The daemon holds no data that is not on the server.
+- Daemon host loss: launch from its own launch template. Its user data installs `claude`, `git` and the fork-built `multica`, writes the managed settings, the systemd unit with the pins, the root certificate and the hosts entry, runs the non-interactive setup above with a new token, and starts the service. The daemon holds no data that is not on the server.
 - If a restored database clone runs beside the original, keep `DO_NOT_TRACK=1` or clear `instance_telemetry_state` (`SELF_HOSTING.md:23`).
 
 Test a full restore into a scratch RDS instance before go-live and then quarterly. Record the measured RTO on the issue.
@@ -643,7 +662,7 @@ Cadence: monthly, or sooner for security fixes.
 - Database, uploads, backups, logs and mail sit in one US region of a US provider.
 - The app is unreachable from the internet except for the WireGuard port, which meets LVCO-7's access criterion at the network layer.
 - Outbound traffic from the app host is denied by default at a layer the instance cannot change. A missed setting or an audit gap fails closed.
-- Agent model traffic for this instance is pinned to Bedrock `us-west-2` by machine-wide managed settings and IAM, on a host that has nothing else to break.
+- Agent model traffic for this instance is held to Bedrock US-region profiles by machine-wide managed settings and IAM, on a host that has nothing else to break.
 - No public certificate authority, DNS provider or VPN service is in the runtime path, and the root CA key is never online.
 
 ### Negative
@@ -685,7 +704,9 @@ These need a running system to prove, so they are written for Fork Engineer rath
   - With `codex` deliberately installed for the test, it still does not register, then uninstall it.
   - `multica runtime profile list` is empty.
   - `multica agent env get` shows no `ANTHROPIC_*`, `AWS_*` or `CLAUDE_CODE_*` keys on any agent.
-  - `/status` in Claude Code shows Bedrock as the provider, and a session started with `CLAUDE_CODE_USE_BEDROCK=0` is refused.
+  - `/status` in Claude Code shows Bedrock as the provider and the `us.` model IDs, and a session started with `CLAUDE_CODE_USE_BEDROCK=0` never reaches the Anthropic API.
+  - Record the destination regions AWS lists for the `us.` profiles, and confirm a request made with `AWS_REGION=eu-west-1` fails.
+  - The daemon host sets up unattended from user data, with no browser login.
 
 ## Decisions for Lawrence
 
@@ -693,7 +714,7 @@ These need a running system to prove, so they are written for Fork Engineer rath
 2. Access: approve WireGuard-only access (recommended), or an IP allowlist on 443 if HP and elias-HP have stable public IPs. Please confirm whether they do.
 3. AWS account and region: proposed `us-west-2`.
 4. Codex: confirm an OpenAI plan with US data residency, or keep `codex` off this instance (recommended).
-5. Agents and inference: run this instance's agents on a dedicated daemon host with Claude on Bedrock (recommended; about $32 to $59 per month for the host plus per-token Bedrock charges as estimated above, and general outbound web access from that host accepted). This changes nothing on HP or elias-HP. The alternative is running this instance's daemon on HP or elias-HP with no `allowedProviders` lock, which keeps CLI and provider limits as policy only and does not meet N1 by enforcement.
+5. Agents and inference: run this instance's agents on a dedicated daemon host with Claude on Bedrock `us.` profiles, which keep model traffic in US regions but not in one region (recommended; about $32 to $59 per month for the host plus per-token Bedrock charges as estimated above, and general outbound web access from that host accepted). This changes nothing on HP or elias-HP. The alternative is running this instance's daemon on HP or elias-HP with no `allowedProviders` lock, which keeps CLI and provider limits as policy only and does not meet N1 by enforcement.
 6. Email: SES with an LVCOI-owned domain (which one, and whether to buy it), or the log-only fallback with no mail.
 7. GHCR package visibility: public (recommended, matches the public repository) or private with a read-only token.
 8. Optional spending: Multi-AZ RDS and cross-region backup copies.
